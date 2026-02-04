@@ -35,6 +35,7 @@ import (
 
 	"cloud.google.com/go/compute/metadata"
 	"github.com/bradfitz/gomemcache/memcache"
+	"github.com/goplus/mod/modfile"
 	"github.com/goplus/www/playground/internal/gcpdial"
 	"github.com/goplus/www/playground/sandbox/sandboxtypes"
 )
@@ -45,7 +46,7 @@ const (
 
 	// progName is the implicit program name written to the temp
 	// dir and used in compiler and vet errors.
-	progName = "prog.go"
+	progName = "prog.xgo"
 )
 
 const (
@@ -439,9 +440,31 @@ func (b *buildResult) cleanup() error {
 
 // sandboxBuildGoplus build the goplus program in a temp directory and not run it;
 func sandboxBuildGoplus(_ context.Context, tmpDir string, in []byte, vet bool) (*buildResult, error) {
-	err := os.WriteFile(filepath.Join(tmpDir, "prog.gop"), []byte(in), 0644)
+	fset, err := splitFiles(in)
 	if err != nil {
 		return nil, err
+	}
+	var test bool
+	var mcp bool
+	for f, src := range fset.m {
+		in := filepath.Join(tmpDir, f)
+		if strings.Contains(f, "/") {
+			if err := os.MkdirAll(filepath.Dir(in), 0755); err != nil {
+				return nil, err
+			}
+		}
+		if err := os.WriteFile(in, src, 0644); err != nil {
+			return nil, fmt.Errorf("error creating temp file %q: %v", in, err)
+		}
+		switch ext := modfile.ClassExt(f); ext {
+		case "_test.go", "_test.xgo", "_test.gox":
+			test = true
+		case "_mcp.gox":
+			mcp = true
+		case "_mtest.gox":
+			mcp = true
+			test = true
+		}
 	}
 
 	br := new(buildResult)
@@ -450,17 +473,12 @@ func sandboxBuildGoplus(_ context.Context, tmpDir string, in []byte, vet bool) (
 	if err != nil {
 		return nil, fmt.Errorf("error find xgo command: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(`
-module playgrounddemo
+	if !fset.Contains("go.mod") {
+		mod := `module playgrounddemo
 
 go 1.24.0
-`), 0644); err != nil {
-		return nil, fmt.Errorf("failed to write go.mod: %w", err)
-	}
-
-	dumyCmd := exec.Command("mkdir", filepath.Join(tmpDir, "dummy"))
-	dumyCmd.Run()
-	if err := os.WriteFile(filepath.Join(tmpDir, "dummy", "dummy.go"), []byte(`
+`
+		dummy := `
 package dummy
 
 import (
@@ -468,15 +486,36 @@ import (
 	_ "github.com/goplus/spx"
 	_ "github.com/qiniu/x/errors"
 )
-`), 0644); err != nil {
-		return nil, fmt.Errorf("failed to write dummy.go: %w", err)
+`
+		if mcp {
+			mod += `require github.com/goplus/mcp v0.9.6 //gop:class
+`
+			dummy += `import _ "github.com/goplus/mcp/mtest"
+`
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(mod), 0644); err != nil {
+			return nil, fmt.Errorf("failed to write go.mod: %w", err)
+		}
+
+		dumyCmd := exec.Command("mkdir", filepath.Join(tmpDir, "dummy"))
+		dumyCmd.Run()
+		if err := os.WriteFile(filepath.Join(tmpDir, "dummy", "dummy.go"), []byte(dummy), 0644); err != nil {
+			return nil, fmt.Errorf("failed to write dummy.go: %w", err)
+		}
 	}
 
 	tidyCmd := exec.Command("go", "mod", "tidy")
 	tidyCmd.Dir = tmpDir
 	tidyCmd.Run()
 
-	cmdGenerate := exec.Command(xgo, "build", "-o", "a.out", ".")
+	var args []string
+	if test {
+		args = []string{"test", "-c", "-o", "a.out", "."}
+	} else {
+		args = []string{"build", "-o", "a.out", "."}
+	}
+
+	cmdGenerate := exec.Command(xgo, args...)
 	cmdGenerate.Dir = tmpDir
 
 	out := &bytes.Buffer{}
@@ -493,6 +532,9 @@ import (
 	}
 
 	br.exePath = filepath.Join(tmpDir, "a.out")
+	if test {
+		br.testParam = "-test.v"
+	}
 	const maxBinarySize = 100 << 20
 	if fi, err := os.Stat(br.exePath); err != nil || fi.Size() == 0 || fi.Size() > maxBinarySize {
 		if err != nil {
