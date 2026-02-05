@@ -500,7 +500,6 @@ import (
 		if err := os.MkdirAll(filepath.Join(tmpDir, "dummy"), 0755); err != nil {
 			return nil, fmt.Errorf("failed to create dummy directory: %w", err)
 		}
-		dumyCmd.Run()
 		if err := os.WriteFile(filepath.Join(tmpDir, "dummy", "dummy.go"), []byte(dummy), 0644); err != nil {
 			return nil, fmt.Errorf("failed to write dummy.go: %w", err)
 		}
